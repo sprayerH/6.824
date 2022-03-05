@@ -23,7 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"../labrpc"
+	"6.824/labrpc"
 )
 
 // import "bytes"
@@ -171,7 +171,7 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if args.Term < rf.currentTerm || (args.Term == rf.currentTerm && rf.voteFor != -1 && rf.voteFor != args.Candidate ){
+	if args.Term < rf.currentTerm || (args.Term == rf.currentTerm && rf.voteFor != -1 && rf.voteFor != args.Candidate) {
 		reply.Term, reply.VoteGranted = rf.currentTerm, false
 		return
 	}
@@ -322,7 +322,7 @@ func (rf *Raft) KickOffElection() {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 				// todo: need to check that current node is still in that term and state
-				DPrintf("[%d] voted: %v ,get vote reply from %d with reply %v ", rf.me, p, reply)
+				DPrintf("[%d] voted: %v ,get vote reply from %d with reply %v ", rf.me, reply.VoteGranted, p, reply)
 				if rf.currentTerm != args.Term || rf.state != Candidate {
 					return
 				}
