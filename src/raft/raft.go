@@ -171,6 +171,7 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	DPrintf("[%d] receive voteRequest with %v", rf.me, args)
 	if args.Term < rf.currentTerm || (args.Term == rf.currentTerm && rf.voteFor != -1 && rf.voteFor != args.Candidate) {
 		reply.Term, reply.VoteGranted = rf.currentTerm, false
 		return
@@ -178,6 +179,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.changeStateTo(Follower)
 		rf.currentTerm, rf.voteFor = args.Term, args.Candidate
+		reply.Term, reply.VoteGranted = rf.currentTerm, true
 	}
 	// do something to logs
 	rf.lastReceiveTime = time.Now()
@@ -322,7 +324,7 @@ func (rf *Raft) KickOffElection() {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 				// todo: need to check that current node is still in that term and state
-				DPrintf("[%d] voted: %v ,get vote reply from %d with reply %v ", rf.me, reply.VoteGranted, p, reply)
+				DPrintf("[%d] voted: %v, get vote reply from %d with reply %v ", rf.me, reply.VoteGranted, p, reply)
 				if rf.currentTerm != args.Term || rf.state != Candidate {
 					return
 				}
