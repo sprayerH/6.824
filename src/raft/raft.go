@@ -17,14 +17,20 @@ package raft
 //   in the same server.
 //
 
-import "sync"
-import "sync/atomic"
-import "../labrpc"
+import (
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"../labrpc"
+)
 
 // import "bytes"
 // import "../labgob"
 
-
+// some const
+const ELECTION_INTERVAL = 100
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -43,6 +49,20 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
+type LogEntry struct {
+	Term    int
+	Index   int
+	Command interface{}
+}
+
+type ServerState int
+
+const (
+	Follower ServerState = iota
+	Candidate
+	Leader
+)
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -56,7 +76,19 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	state           ServerState
+	lastReceiveTime time.Time
 
+	// persistent state
+	currentTerm int
+	voteFor     int
+	logs        []LogEntry
+	// volatile state
+	commitIndex int
+	lastApplied int
+	// volatile state on leaders
+	nextIndex  []int
+	matchIndex []int
 }
 
 // return currentTerm and whether this server
@@ -65,7 +97,11 @@ func (rf *Raft) GetState() (int, bool) {
 
 	var term int
 	var isleader bool
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	// Your code here (2A).
+	term = rf.currentTerm
+	isleader = rf.state == Leader
 	return term, isleader
 }
 
@@ -84,7 +120,6 @@ func (rf *Raft) persist() {
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
 }
-
 
 //
 // restore previously persisted state.
@@ -108,15 +143,16 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
-
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term         int
+	Candidate    int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -125,13 +161,26 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int
+	VoteGranted bool
 }
 
 //
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term < rf.currentTerm || (args.Term == rf.currentTerm && rf.voteFor != -1 && rf.voteFor != args.Candidate ){
+		reply.Term, reply.VoteGranted = rf.currentTerm, false
+		return
+	}
+	if args.Term > rf.currentTerm {
+		rf.changeStateTo(Follower)
+		rf.currentTerm, rf.voteFor = args.Term, args.Candidate
+	}
+	// do something to logs
+	rf.lastReceiveTime = time.Now()
 }
 
 //
@@ -168,7 +217,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -189,7 +237,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -215,6 +262,90 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+// caller should hold lock
+func (rf *Raft) changeStateTo(state ServerState) {
+	rf.state = state
+}
+
+func (rf *Raft) getLastLogEntry() LogEntry {
+
+	return LogEntry{Term: 0, Index: 0}
+}
+
+// goroutine LeaderElection
+func (rf *Raft) LeaderElection() {
+	for {
+		electionTimeout := ELECTION_INTERVAL + rand.Intn(ELECTION_INTERVAL)
+		startTime := time.Now()
+		time.Sleep(time.Duration(electionTimeout) * time.Millisecond)
+		rf.mu.Lock()
+		if rf.killed() {
+			rf.mu.Unlock()
+			return
+		}
+		// if rf.state != Follower {
+		// 	rf.mu.Unlock()
+		// 	continue
+		// }
+		if rf.lastReceiveTime.Before(startTime) {
+			if rf.state != Leader {
+				DPrintf("[%d] kicks off election", rf.me)
+				go rf.KickOffElection()
+			}
+		}
+		rf.mu.Unlock()
+	}
+
+}
+
+func (rf *Raft) KickOffElection() {
+	rf.mu.Lock()
+	// change state to candidate
+	rf.changeStateTo(Candidate)
+	rf.currentTerm++
+	rf.lastReceiveTime = time.Now()
+	rf.voteFor = rf.me
+	// construct request arg
+	lastLogEntry := rf.getLastLogEntry()
+	args := RequestVoteArgs{rf.currentTerm, rf.me, lastLogEntry.Term, lastLogEntry.Index}
+	votegotten := 1
+	rf.mu.Unlock()
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			go func(p int) {
+				DPrintf("[%d] request vote to %d with args %v ", rf.me, p, args)
+				reply := RequestVoteReply{}
+				ok := rf.sendRequestVote(p, &args, &reply)
+				if !ok {
+					return
+				}
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				// todo: need to check that current node is still in that term and state
+				DPrintf("[%d] voted: %v ,get vote reply from %d with reply %v ", rf.me, p, reply)
+				if rf.currentTerm != args.Term || rf.state != Candidate {
+					return
+				}
+				if reply.Term > rf.currentTerm {
+					rf.changeStateTo(Follower)
+					rf.currentTerm = reply.Term
+					rf.voteFor = -1
+					rf.lastReceiveTime = time.Now()
+					return
+				}
+				if reply.VoteGranted {
+					votegotten++
+					if votegotten > len(rf.peers)/2 {
+						rf.changeStateTo(Leader)
+						rf.lastReceiveTime = time.Now()
+					}
+				}
+			}(i)
+		}
+	}
+
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -228,16 +359,26 @@ func (rf *Raft) killed() bool {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
-
-	// Your initialization code here (2A, 2B, 2C).
-
+	rf := &Raft{
+		peers:           peers,
+		persister:       persister,
+		me:              me,
+		dead:            0,
+		state:           Follower,
+		lastReceiveTime: time.Now(),
+		currentTerm:     0,
+		voteFor:         -1,
+		logs:            make([]LogEntry, 1),
+		commitIndex:     0,
+		lastApplied:     0,
+		nextIndex:       make([]int, len(peers)),
+		matchIndex:      make([]int, len(peers)),
+	}
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	go rf.LeaderElection()
+	DPrintf("[%d] peer initialized", rf.me)
 
 	return rf
 }
