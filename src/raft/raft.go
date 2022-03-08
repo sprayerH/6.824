@@ -174,16 +174,19 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf("[%d] in (term %d) received voteRequest with %+v", rf.me, rf.currentTerm, args)
+	// current term bigger than arg.term or same term but has voted for other candidate
 	if args.Term < rf.currentTerm || (args.Term == rf.currentTerm && rf.voteFor != -1 && rf.voteFor != args.CandidateId) {
 		reply.Term, reply.VoteGranted = rf.currentTerm, false
 		return
 	}
 	if args.Term > rf.currentTerm {
 		rf.convertToFollower(args.Term)
-		reply.Term, reply.VoteGranted = rf.currentTerm, true
 	}
-	// do something to logs
-	rf.lastReceiveTime = time.Now()
+	// in 2A just pass
+	rf.voteFor = args.CandidateId
+	reply.Term, reply.VoteGranted = rf.currentTerm, true
+	rf.resetElectionTimeout()
+	// in 2B should do some check on log
 }
 
 //
@@ -257,21 +260,26 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
+// lock hold by caller
 func (rf *Raft) broadcastHeartbeat() {
 	DPrintf("[%d] in (term %d) broadcast heartbeat", rf.me, rf.currentTerm)
+	args := AppendEntriesArgs{
+		Term:     rf.currentTerm,
+		LeaderId: rf.me,
+	}
 	for i := 0; i < len(rf.peers); i++ {
-		if i == rf.me {
-			continue
+		if i != rf.me {
+			go func(p int) {
+				reply := AppendEntriesReply{}
+				if rf.sendAppendEntries(p, &args, &reply) {
+					rf.mu.Lock()
+					defer rf.mu.Unlock()
+					if rf.state == Leader && reply.Term > rf.currentTerm {
+						rf.convertToFollower(reply.Term)
+					}
+				}
+			}(i)
 		}
-		if rf.state != Leader {
-			return
-		}
-		args := AppendEntriesArgs{
-			Term:     rf.currentTerm,
-			LeaderId: rf.me,
-		}
-		reply := AppendEntriesReply{}
-		go rf.sendAppendEntries(i, &args, &reply)
 	}
 }
 
@@ -358,8 +366,8 @@ func (rf *Raft) HeartbeatRoutine() {
 			rf.mu.Unlock()
 			return
 		}
-		rf.mu.Unlock()
 		rf.broadcastHeartbeat()
+		rf.mu.Unlock()
 	}
 }
 
@@ -418,8 +426,8 @@ func (rf *Raft) KickOffElection() {
 					votegotten++
 					if votegotten > len(rf.peers)/2 {
 						rf.convertToLeader()
-						go rf.HeartbeatRoutine()
 						rf.broadcastHeartbeat()
+						go rf.HeartbeatRoutine()
 					}
 				}
 			}(i)
