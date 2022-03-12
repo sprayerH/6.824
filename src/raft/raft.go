@@ -31,7 +31,7 @@ import (
 
 // some const
 const ELECTION_INTERVAL = 150
-const ELECTION_CHECK_TICK = 50
+const ELECTION_CHECK_TICK = 10
 const HEARTBEAT_INTERVAL = 100
 
 //
@@ -270,11 +270,12 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-// lock hold by caller. used to broadcast heartbeat and append entried to peers 
+// lock hold by caller. used to broadcast heartbeat and append entried to peers
 // first implemention is just use heartbeat to append entries
-func (rf *Raft) broadcastHeartbeat(isHeartbeat bool) {
+// second implemention: true for heartbeat false for replicator( send rpc one by one )
+func (rf *Raft) broadcastHeartbeat() {
 	DPrintf("[%d] in (term %d) broadcast heartbeat", rf.me, rf.currentTerm)
-	
+
 	args := AppendEntriesArgs{
 		Term:     rf.currentTerm,
 		LeaderId: rf.me,
@@ -415,7 +416,7 @@ func (rf *Raft) LeaderElection() {
 		if time.Now().After(rf.electionTimeout) {
 			if rf.state != Leader {
 				DPrintf("[%d] in (term %d) kicks off election", rf.me, rf.currentTerm)
-				go rf.KickOffElection()
+				rf.KickOffElection()
 			}
 		}
 
@@ -425,14 +426,14 @@ func (rf *Raft) LeaderElection() {
 }
 
 func (rf *Raft) KickOffElection() {
-	rf.mu.Lock()
+	//rf.mu.Lock()
 	// change state to candidate
 	rf.convertToCandidate()
 	// construct request arg
 	lastLogEntry := rf.getLastLogEntry()
 	args := RequestVoteArgs{rf.currentTerm, rf.me, lastLogEntry.Term, lastLogEntry.Index}
 	votegotten := 1
-	rf.mu.Unlock()
+	//rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
 			go func(p int) {
