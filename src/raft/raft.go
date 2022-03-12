@@ -31,7 +31,7 @@ import (
 // import "../labgob"
 
 // some const
-const ELECTION_INTERVAL = 150
+const ELECTION_INTERVAL = 200
 const ELECTION_CHECK_TICK = 10
 const HEARTBEAT_INTERVAL = 100
 
@@ -271,7 +271,8 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("[%d] in (term %d) recevied request appendentries with %+v", rf.me, rf.currentTerm, args)
+	DPrintf("[%d] in (term %d) received request appendEntries {Term: %d, LeaderId: %d, PrevLogIndex: %d, PrevLogTerm: %d, LeaderCommit: %d}",
+		rf.me, rf.currentTerm, args.Term, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
 	lastlog := rf.getLastLogEntry()
 	var mismatchIndex int
 
@@ -298,14 +299,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = true
 
 	// check if mismatch in arg.entries. if it exits, replace the part after mismatchIndex
-	if len(args.Entries) == 0 {
-		goto reply
-	}
+	// if len(args.Entries) == 0 {
+	// 	goto reply
+	// }
 	mismatchIndex = -1
+	//	DPrintf("[%d] in (term %d) recevied request appendentries with %+v in mismatch %+v", rf.me, rf.currentTerm, args, rf.logs)
+
 	for i := 0; i < len(args.Entries); i++ {
 		indexOfLogs := args.PrevLogIndex + 1 + i
 		if indexOfLogs >= len(rf.logs) || rf.logs[indexOfLogs].Term != args.Entries[i].Term {
 			mismatchIndex = indexOfLogs
+			break
 		}
 	}
 	// mismatch exits
@@ -316,7 +320,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// update commitIndex
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.getLastLogEntry().Index)
-		DPrintf("[%d (term %d) follower commit %d", rf.me, rf.currentTerm, rf.commitIndex)
+		DPrintf("[%d] in (term %d) follower commit %d", rf.me, rf.currentTerm, rf.commitIndex)
 		// do the applier or inform the applier goroutine:  applierchan <- 1
 		rf.apply()
 	}
@@ -340,7 +344,7 @@ func (rf *Raft) broadcastHeartbeat(isHeartbeat bool) {
 	lastlog := rf.getLastLogEntry()
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
-			DPrintf("[%d] in (term %d) broadcast heartbeat: lastlog.index: %d nextindex: %d", rf.me, rf.currentTerm, lastlog.Index, rf.nextIndex[i])
+			DPrintf("[%d] in (term %d) broadcast heartbeat: lastlog.index: %d [%d] nextindex: %d", rf.me, rf.currentTerm, lastlog.Index, i, rf.nextIndex[i])
 			// check if there are entries need to be replicated
 			if lastlog.Index >= rf.nextIndex[i] || isHeartbeat {
 				prevLog := rf.logs[rf.nextIndex[i]-1]
@@ -354,7 +358,10 @@ func (rf *Raft) broadcastHeartbeat(isHeartbeat bool) {
 				}
 				copy(args.Entries, rf.logs[prevLog.Index+1:])
 				go rf.doReplicate(i, &args)
-				DPrintf("[%d] in (term %d) send appendEntries %+v", rf.me, rf.currentTerm, args)
+				// DPrintf("[%d] in (term %d) send appendEntries arg: %+v",
+				// 	rf.me, rf.currentTerm, args)
+				DPrintf("[%d] in (term %d) send appendEntries {Term: %d, LeaderId: %d, PrevLogIndex: %d, PrevLogTerm: %d, LeaderCommit: %d}",
+					rf.me, rf.currentTerm, args.Term, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
 			}
 		}
 	}
@@ -451,7 +458,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index = log.Index
 	term = log.Term
 	isLeader = true
-	DPrintf("[%d]: (term %d) Start received command: index: %d, term: %d", rf.me, rf.currentTerm, index, term)
+	DPrintf("[%d] in (term %d) Start received command: index: %d, term: %d", rf.me, rf.currentTerm, index, term)
+	rf.broadcastHeartbeat(false)
 	return index, term, isLeader
 }
 
@@ -562,7 +570,7 @@ func (rf *Raft) KickOffElection() {
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
 			go func(p int) {
-				DPrintf("[%d] in (term %d) request vote to [%d] with args %+v ", rf.me, rf.currentTerm, p, args)
+				//DPrintf("[%d] in (term %d) request vote to [%d] with args %+v ", rf.me, rf.currentTerm, p, args)
 				reply := RequestVoteReply{}
 				ok := rf.sendRequestVote(p, &args, &reply)
 				if !ok {
@@ -617,7 +625,7 @@ func (rf *Raft) applier() {
 			}
 		}
 		rf.mu.Lock()
-		DPrintf("[%d] (term %d) applies %v-%v", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
+		DPrintf("[%d] in (term %d) applies %v-%v", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
 		// todo: maybe fix up in snapshot phase cause installSnapshot would update lastapplied
 		rf.lastApplied = commitIndex
 		rf.mu.Unlock()
