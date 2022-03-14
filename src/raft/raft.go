@@ -459,7 +459,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term = log.Term
 	isLeader = true
 	DPrintf("[%d] in (term %d) Start received command: index: %d, term: %d", rf.me, rf.currentTerm, index, term)
-	rf.broadcastHeartbeat(false)
+	//rf.broadcastHeartbeat(false)
 	return index, term, isLeader
 }
 
