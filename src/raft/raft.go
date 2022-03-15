@@ -32,7 +32,7 @@ import (
 
 // some const
 const ELECTION_INTERVAL = 200
-const ELECTION_CHECK_TICK = 10
+const ELECTION_CHECK_TICK = 50
 const HEARTBEAT_INTERVAL = 100
 
 func min(a, b int) int {
@@ -49,6 +49,11 @@ func max(a, b int) int {
 	} else {
 		return b
 	}
+}
+
+func getStateName(s ServerState) string {
+	names := [3]string{"follower", "candidate", "leader"}
+	return names[s]
 }
 
 //
@@ -194,7 +199,7 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("[%d] in (term %d) received voteRequest with %+v", rf.me, rf.currentTerm, args)
+	DPrintf("[%d] in (term %d) as (%v) received voteRequest with %+v", rf.me, rf.currentTerm, getStateName(rf.state), args)
 	// current term bigger than arg.term or same term but has voted for other candidate
 	if args.Term < rf.currentTerm || (args.Term == rf.currentTerm && rf.voteFor != -1 && rf.voteFor != args.CandidateId) {
 		reply.Term, reply.VoteGranted = rf.currentTerm, false
@@ -271,19 +276,25 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("[%d] in (term %d) received request appendEntries {Term: %d, LeaderId: %d, PrevLogIndex: %d, PrevLogTerm: %d, LeaderCommit: %d}",
-		rf.me, rf.currentTerm, args.Term, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
+	DPrintf("[%d] in (term %d) as (%v) received request appendEntries {Term: %d, LeaderId: %d, PrevLogIndex: %d, PrevLogTerm: %d, LeaderCommit: %d}",
+		rf.me, rf.currentTerm, getStateName(rf.state), args.Term, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
 	lastlog := rf.getLastLogEntry()
 	var mismatchIndex int
 
 	reply.Success = false
 	if args.Term < rf.currentTerm {
-		goto reply
+		reply.Term = rf.currentTerm
+		DPrintf("[%d] in (term %d) as (%v) handle appendEntries %+v", rf.me, rf.currentTerm, getStateName(rf.state), reply)
+		return
 	}
 
 	if args.Term > rf.currentTerm {
 		rf.convertToFollower(args.Term)
 	}
+
+	// when term is same, change state to follower
+	rf.state = Follower
+	rf.resetElectionTimeout()
 
 	// 论文中的版本 日志恢复 先不考虑snapshot; todo 优化：日志快速恢复
 	// check prevLog
@@ -303,7 +314,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 	goto reply
 	// }
 	mismatchIndex = -1
-	//	DPrintf("[%d] in (term %d) recevied request appendentries with %+v in mismatch %+v", rf.me, rf.currentTerm, args, rf.logs)
+	//	DPrintf("[%d] in (term %d) as (%v) recevied request appendentries with %+v in mismatch %+v", rf.me, rf.currentTerm, getStateName(rf.state), args, rf.logs)
 
 	for i := 0; i < len(args.Entries); i++ {
 		indexOfLogs := args.PrevLogIndex + 1 + i
@@ -320,15 +331,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// update commitIndex
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.getLastLogEntry().Index)
-		DPrintf("[%d] in (term %d) follower commit %d", rf.me, rf.currentTerm, rf.commitIndex)
+		DPrintf("[%d] in (term %d) as (%v) commit %d", rf.me, rf.currentTerm, getStateName(rf.state), rf.commitIndex)
 		// do the applier or inform the applier goroutine:  applierchan <- 1
 		rf.apply()
 	}
 
+	// only when recevied from leader then go here
 reply:
 	reply.Term = rf.currentTerm
 	rf.resetElectionTimeout()
-	DPrintf("[%d] in (term %d) handle appendEntries %+v", rf.me, rf.currentTerm, reply)
+	DPrintf("[%d] in (term %d) as (%v) handle appendEntries %+v", rf.me, rf.currentTerm, getStateName(rf.state), reply)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -340,11 +352,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // first implemention is just use heartbeat to append entries
 // second implemention: true for heartbeat false for replicator( send rpc one by one )
 func (rf *Raft) broadcastHeartbeat(isHeartbeat bool) {
-	DPrintf("[%d] in (term %d) broadcast heartbeat", rf.me, rf.currentTerm)
+	DPrintf("[%d] in (term %d) as (%v) broadcast heartbeat", rf.me, rf.currentTerm, getStateName(rf.state))
 	lastlog := rf.getLastLogEntry()
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
-			DPrintf("[%d] in (term %d) broadcast heartbeat: lastlog.index: %d [%d] nextindex: %d", rf.me, rf.currentTerm, lastlog.Index, i, rf.nextIndex[i])
+			//DPrintf("[%d] in (term %d) as (%v) broadcast heartbeat: lastlog.index: %d [%d] nextindex: %d", rf.me, rf.currentTerm, getStateName(rf.state), lastlog.Index, i, rf.nextIndex[i])
 			// check if there are entries need to be replicated
 			if lastlog.Index >= rf.nextIndex[i] || isHeartbeat {
 				prevLog := rf.logs[rf.nextIndex[i]-1]
@@ -358,10 +370,10 @@ func (rf *Raft) broadcastHeartbeat(isHeartbeat bool) {
 				}
 				copy(args.Entries, rf.logs[prevLog.Index+1:])
 				go rf.doReplicate(i, &args)
-				// DPrintf("[%d] in (term %d) send appendEntries arg: %+v",
+				// DPrintf("[%d] in (term %d) as (%v) send appendEntries arg: %+v",
 				// 	rf.me, rf.currentTerm, args)
-				DPrintf("[%d] in (term %d) send appendEntries {Term: %d, LeaderId: %d, PrevLogIndex: %d, PrevLogTerm: %d, LeaderCommit: %d}",
-					rf.me, rf.currentTerm, args.Term, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
+				DPrintf("[%d] in (term %d) as (%v) send to [%d] appendEntries {Term: %d, LeaderId: %d, PrevLogIndex: %d, PrevLogTerm: %d, LeaderCommit: %d}",
+					rf.me, rf.currentTerm, getStateName(rf.state), i, args.Term, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
 			}
 		}
 	}
@@ -411,7 +423,7 @@ func (rf *Raft) doReplicate(peer int, args *AppendEntriesArgs) {
 			}
 		}
 		if commited {
-			DPrintf("[%d] in (term %d) commit index %d", rf.me, rf.currentTerm, rf.commitIndex)
+			DPrintf("[%d] in (term %d) as (%v) commit index %d", rf.me, rf.currentTerm, getStateName(rf.state), rf.commitIndex)
 			rf.apply()
 		}
 
@@ -458,7 +470,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index = log.Index
 	term = log.Term
 	isLeader = true
-	DPrintf("[%d] in (term %d) Start received command: index: %d, term: %d", rf.me, rf.currentTerm, index, term)
+	DPrintf("[%d] in (term %d) as (%v) Start received command: index: %d, term: %d", rf.me, rf.currentTerm, getStateName(rf.state), index, term)
 	//rf.broadcastHeartbeat(false)
 	return index, term, isLeader
 }
@@ -488,6 +500,7 @@ func (rf *Raft) resetElectionTimeout() {
 	rf.electionTimeout = time.Now().Add(time.Duration(ELECTION_INTERVAL+rand.Intn(ELECTION_INTERVAL)) * time.Millisecond)
 }
 
+// reset election timeout
 func (rf *Raft) convertToCandidate() {
 	rf.state = Candidate
 	rf.currentTerm++
@@ -495,12 +508,16 @@ func (rf *Raft) convertToCandidate() {
 	rf.resetElectionTimeout()
 }
 
+// only happened when args.term > rf.term.
+// reset election timeout when convert from leader
 func (rf *Raft) convertToFollower(newTerm int) {
+	if rf.state == Leader {
+		rf.resetElectionTimeout()
+	}
 	rf.state = Follower
 	rf.currentTerm = newTerm
 	rf.voteFor = -1
-	rf.resetElectionTimeout()
-	DPrintf("[%d] in (term %d) become follower", rf.me, rf.currentTerm)
+	DPrintf("[%d] in (term %d) as (%v) become follower", rf.me, rf.currentTerm, getStateName(rf.state))
 }
 
 func (rf *Raft) convertToLeader() {
@@ -509,7 +526,7 @@ func (rf *Raft) convertToLeader() {
 		rf.nextIndex[i] = rf.getLastLogEntry().Index + 1
 		rf.matchIndex[i] = 0
 	}
-	DPrintf("[%d] in (term %d) become leader", rf.me, rf.currentTerm)
+	DPrintf("[%d] in (term %d) as (%v) become leader", rf.me, rf.currentTerm, getStateName(rf.state))
 }
 
 func (rf *Raft) getLastLogEntry() LogEntry {
@@ -535,14 +552,14 @@ func (rf *Raft) LeaderElection() {
 	for {
 		time.Sleep(time.Duration(ELECTION_CHECK_TICK) * time.Millisecond)
 		rf.mu.Lock()
-		//DPrintf("[%d] in (term %d) election time out check", rf.me, rf.currentTerm)
+		//DPrintf("[%d] in (term %d) as (%v) election time out check", rf.me, rf.currentTerm)
 		if rf.killed() {
 			rf.mu.Unlock()
 			return
 		}
 		if time.Now().After(rf.electionTimeout) {
 			if rf.state != Leader {
-				DPrintf("[%d] in (term %d) kicks off election", rf.me, rf.currentTerm)
+				DPrintf("[%d] in (term %d) as (%v) kicks off election", rf.me, rf.currentTerm, getStateName(rf.state))
 				rf.KickOffElection()
 			}
 		}
@@ -570,7 +587,7 @@ func (rf *Raft) KickOffElection() {
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
 			go func(p int) {
-				//DPrintf("[%d] in (term %d) request vote to [%d] with args %+v ", rf.me, rf.currentTerm, p, args)
+				//DPrintf("[%d] in (term %d) as (%v) request vote to [%d] with args %+v ", rf.me, rf.currentTerm, getStateName(rf.state), p, args)
 				reply := RequestVoteReply{}
 				ok := rf.sendRequestVote(p, &args, &reply)
 				if !ok {
@@ -579,7 +596,7 @@ func (rf *Raft) KickOffElection() {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 				// todo: need to check that current node is still in that term and state
-				DPrintf("[%d] in (term %d) get vote reply from [%d] with reply %+v ", rf.me, rf.currentTerm, p, reply)
+				DPrintf("[%d] in (term %d) as (%v) get vote reply from [%d] with reply %+v ", rf.me, rf.currentTerm, getStateName(rf.state), p, reply)
 				if rf.currentTerm != args.Term || rf.state != Candidate {
 					return
 				}
@@ -625,7 +642,7 @@ func (rf *Raft) applier() {
 			}
 		}
 		rf.mu.Lock()
-		DPrintf("[%d] in (term %d) applies %v-%v", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
+		DPrintf("[%d] in (term %d) as (%v) applies %v-%v", rf.me, rf.currentTerm, getStateName(rf.state), rf.lastApplied, rf.commitIndex)
 		// todo: maybe fix up in snapshot phase cause installSnapshot would update lastapplied
 		rf.lastApplied = commitIndex
 		rf.mu.Unlock()

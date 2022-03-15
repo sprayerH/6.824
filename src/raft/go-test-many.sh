@@ -73,7 +73,7 @@ fi
 
 
 # Figure out where we left off
-logs=$(find . -maxdepth 2 -name 'test-*.log' -type f -printf '.' | wc -c)
+logs=$(find ./test-tmp/ -maxdepth 2 -name 'test-*.log' -type f -printf '.' | wc -c)
 success=$(grep -E '^PASS$' ./test-tmp/test-*.log | wc -l)
 ((failed = logs - success))
 
@@ -112,7 +112,7 @@ cleanup() {
 	for pid in "${waits[@]}"; do
 		kill "$pid"
 		wait "$pid"
-		rm -rf "test-${is[0]}.err" "test-${is[0]}.log"
+		# rm -rf "test-${is[0]}.err" "test-${is[0]}.log"
 		rm -rf "./test-tmp/test-${is[0]}.err" "./test-tmp/test-${is[0]}.log"
 		is=("${is[@]:1}")
 	done
