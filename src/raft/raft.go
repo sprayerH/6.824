@@ -268,8 +268,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term          int
+	Success       bool
+	ConflictIndex int
+	ConflictTerm  int
 }
 
 // just for lab2a now leader election
@@ -300,11 +302,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// check prevLog
 	// there is no prevlogindex
 	if lastlog.Index < args.PrevLogIndex {
-		goto reply
+		reply.ConflictIndex = len(rf.logs)
+		reply.ConflictTerm = -1
+		goto End
 	}
 	// prevlogindex exits, but differ in term
 	if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
-		goto reply
+		reply.ConflictTerm = rf.logs[args.PrevLogIndex].Term
+		reply.ConflictIndex = args.PrevLogIndex
+		for i := args.PrevLogIndex; i > 0; i-- {
+			if rf.logs[i-1].Term != reply.ConflictTerm {
+				reply.ConflictIndex = i
+				break
+			}
+		}
+		goto End
 	}
 
 	reply.Success = true
@@ -337,7 +349,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// only when recevied from leader then go here
-reply:
+End:
 	reply.Term = rf.currentTerm
 	rf.resetElectionTimeout()
 	DPrintf("[%d] in (term %d) as (%v) handle appendEntries %+v", rf.me, rf.currentTerm, getStateName(rf.state), reply)
@@ -429,7 +441,27 @@ func (rf *Raft) doReplicate(peer int, args *AppendEntriesArgs) {
 
 	} else {
 		// just fallback 1 todo: should implement fast fallback
-		rf.nextIndex[peer]--
+		//rf.nextIndex[peer]--
+		// prelogindex does not exist in remote node
+		// rf.nextIndex[peer] = reply.ConflictIndex
+		// if reply.ConflictTerm != -1 {
+		// 	lastIndex := rf.getLastLogEntry().Index
+		// 	for i := lastIndex + 1; i >= 1; i-- {
+		// 		if rf.logs[i - 1].Term == reply.ConflictTerm {
+		// 			rf.nextIndex[peer] = i
+		// 		}
+		// 	}
+		// }
+		if reply.ConflictTerm == -1 || rf.logs[reply.ConflictIndex].Term != reply.ConflictTerm {
+			rf.nextIndex[peer] = reply.ConflictIndex
+		} else {
+			for i := reply.ConflictIndex; i <= args.PrevLogIndex; i++ {
+				if rf.logs[i].Term != reply.ConflictTerm {
+					rf.nextIndex[peer] = i
+					break
+				}
+			}
+		}
 	}
 
 }
@@ -595,7 +627,7 @@ func (rf *Raft) KickOffElection() {
 				}
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				// todo: need to check that current node is still in that term and state
+				// check that current node is still in that term and state
 				DPrintf("[%d] in (term %d) as (%v) get vote reply from [%d] with reply %+v ", rf.me, rf.currentTerm, getStateName(rf.state), p, reply)
 				if rf.currentTerm != args.Term || rf.state != Candidate {
 					return
