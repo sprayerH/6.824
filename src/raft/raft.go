@@ -18,12 +18,14 @@ package raft
 //
 
 import (
+	"bytes"
 	"math/rand"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -141,12 +143,13 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.voteFor)
+	e.Encode(rf.logs)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -158,17 +161,19 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var term int
+	var votefor int
+	var logs []LogEntry
+	if d.Decode(&term) != nil ||
+		d.Decode(&votefor) != nil || d.Decode(&logs) != nil {
+		DPrintf("[%d] in (term %d) as (%v) Error in readPersist", rf.me, rf.currentTerm, getStateName(rf.state))
+	} else {
+		rf.currentTerm = term
+		rf.voteFor = votefor
+		rf.logs = logs
+	}
 }
 
 //
@@ -211,11 +216,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// check up-to-date todo: maybe some bug here because dont check if logs is empty
 	if !rf.isUpToDate(args.LastLogTerm, args.LastLogIndex) {
 		reply.Term, reply.VoteGranted = rf.currentTerm, false
+		rf.persist()
 		return
 	}
 	rf.voteFor = args.CandidateId
 	reply.Term, reply.VoteGranted = rf.currentTerm, true
 	rf.resetElectionTimeout()
+	rf.persist()
 }
 
 // caller should hold lock todo: may be bug latter
@@ -282,6 +289,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.me, rf.currentTerm, getStateName(rf.state), args.Term, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
 	lastlog := rf.getLastLogEntry()
 	var mismatchIndex int
+	var needPersist bool
 
 	reply.Success = false
 	if args.Term < rf.currentTerm {
@@ -292,6 +300,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.Term > rf.currentTerm {
 		rf.convertToFollower(args.Term)
+		needPersist = true
 	}
 
 	// when term is same, change state to follower
@@ -338,6 +347,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// mismatch exits
 	if mismatchIndex != -1 {
 		rf.logs = append(rf.logs[:mismatchIndex], args.Entries[mismatchIndex-args.PrevLogIndex-1:]...)
+		needPersist = true
 	}
 
 	// update commitIndex
@@ -352,6 +362,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 End:
 	reply.Term = rf.currentTerm
 	rf.resetElectionTimeout()
+	if needPersist {
+		rf.persist()
+	}
 	DPrintf("[%d] in (term %d) as (%v) handle appendEntries %+v", rf.me, rf.currentTerm, getStateName(rf.state), reply)
 }
 
@@ -410,6 +423,7 @@ func (rf *Raft) doReplicate(peer int, args *AppendEntriesArgs) {
 
 	if rf.currentTerm < reply.Term {
 		rf.convertToFollower(reply.Term)
+		rf.persist()
 		return
 	}
 
@@ -497,6 +511,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.logs = append(rf.logs, log)
+	rf.persist()
 	rf.matchIndex[rf.me] = log.Index
 	rf.nextIndex[rf.me] = log.Index + 1
 	index = log.Index
@@ -605,6 +620,7 @@ func (rf *Raft) KickOffElection() {
 	//rf.mu.Lock()
 	// change state to candidate
 	rf.convertToCandidate()
+	rf.persist()
 	// construct request arg
 	lastLogEntry := rf.getLastLogEntry()
 	//args := RequestVoteArgs{rf.currentTerm, rf.me, lastLogEntry.Term, lastLogEntry.Index}
@@ -634,6 +650,7 @@ func (rf *Raft) KickOffElection() {
 				}
 				if reply.Term > rf.currentTerm {
 					rf.convertToFollower(reply.Term)
+					rf.persist()
 					return
 				}
 				if reply.VoteGranted {
