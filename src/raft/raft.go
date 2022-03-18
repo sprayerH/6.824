@@ -33,9 +33,9 @@ import (
 // import "../labgob"
 
 // some const
-const ELECTION_INTERVAL = 200
-const ELECTION_CHECK_TICK = 50
-const HEARTBEAT_INTERVAL = 100
+const ELECTION_INTERVAL = 250
+const ELECTION_CHECK_TICK = 10
+const HEARTBEAT_INTERVAL = 80
 
 func min(a, b int) int {
 	if a >= b {
@@ -294,7 +294,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = false
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
-		DPrintf("[%d] in (term %d) as (%v) handle appendEntries %+v", rf.me, rf.currentTerm, getStateName(rf.state), reply)
+		DPrintf("[%d] in (term %d) as (%v) (outdated) handle appendEntries %+v", rf.me, rf.currentTerm, getStateName(rf.state), reply)
 		return
 	}
 
@@ -414,16 +414,15 @@ func (rf *Raft) doReplicate(peer int, args *AppendEntriesArgs) {
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
+	DPrintf("[%d] in (term %d) as (%v) handle [%d]'s appendentries reply %+v", rf.me, rf.currentTerm, getStateName(rf.state), peer, reply)
 	// check rpc delay and if rf.state has changed
 	// check if it is a outdated rpc reply
-	if rf.currentTerm != args.Term || rf.state != Leader || rf.nextIndex[peer] != args.PrevLogIndex+1 {
-		return
-	}
-
 	if rf.currentTerm < reply.Term {
 		rf.convertToFollower(reply.Term)
 		rf.persist()
+		return
+	}
+	if rf.currentTerm != args.Term || rf.state != Leader {
 		return
 	}
 
@@ -454,18 +453,6 @@ func (rf *Raft) doReplicate(peer int, args *AppendEntriesArgs) {
 		}
 
 	} else {
-		// just fallback 1 todo: should implement fast fallback
-		//rf.nextIndex[peer]--
-		// prelogindex does not exist in remote node
-		// rf.nextIndex[peer] = reply.ConflictIndex
-		// if reply.ConflictTerm != -1 {
-		// 	lastIndex := rf.getLastLogEntry().Index
-		// 	for i := lastIndex + 1; i >= 1; i-- {
-		// 		if rf.logs[i - 1].Term == reply.ConflictTerm {
-		// 			rf.nextIndex[peer] = i
-		// 		}
-		// 	}
-		// }
 		if reply.ConflictTerm == -1 || rf.logs[reply.ConflictIndex].Term != reply.ConflictTerm {
 			rf.nextIndex[peer] = reply.ConflictIndex
 		} else {
@@ -732,7 +719,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	rand.Seed(time.Now().Unix())
+	rand.Seed(time.Now().Unix() + int64(rf.me))
 	rf.resetElectionTimeout()
 	go rf.LeaderElection()
 	DPrintf("[%d] peer initialized", rf.me)
