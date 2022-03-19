@@ -33,9 +33,9 @@ import (
 // import "../labgob"
 
 // some const
-const ELECTION_INTERVAL = 250
+const ELECTION_INTERVAL = 500
 const ELECTION_CHECK_TICK = 10
-const HEARTBEAT_INTERVAL = 80
+const HEARTBEAT_INTERVAL = 50
 
 func min(a, b int) int {
 	if a >= b {
@@ -104,7 +104,7 @@ type Raft struct {
 	// state a Raft server must maintain.
 	state           ServerState
 	electionTimeout time.Time // for follower election timeout
-	lastHeartbeat   time.Time // for leader heartbeat
+	lastHeartbeat   time.Time // for leader heartbeat not used
 
 	// persistent state
 	currentTerm int
@@ -353,7 +353,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// update commitIndex
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.getLastLogEntry().Index)
-		DPrintf("[%d] in (term %d) as (%v) commit %d", rf.me, rf.currentTerm, getStateName(rf.state), rf.commitIndex)
+		DPrintf("[%d] in (term %d) as (%v) commit index %d", rf.me, rf.currentTerm, getStateName(rf.state), rf.commitIndex)
 		// do the applier or inform the applier goroutine:  applierchan <- 1
 		rf.apply()
 	}
@@ -417,15 +417,14 @@ func (rf *Raft) doReplicate(peer int, args *AppendEntriesArgs) {
 	DPrintf("[%d] in (term %d) as (%v) handle [%d]'s appendentries reply %+v", rf.me, rf.currentTerm, getStateName(rf.state), peer, reply)
 	// check rpc delay and if rf.state has changed
 	// check if it is a outdated rpc reply
+	if rf.currentTerm != args.Term || rf.state != Leader {
+		return
+	}
 	if rf.currentTerm < reply.Term {
 		rf.convertToFollower(reply.Term)
 		rf.persist()
 		return
 	}
-	if rf.currentTerm != args.Term || rf.state != Leader {
-		return
-	}
-
 	if reply.Success {
 		matchIndex := args.PrevLogIndex + len(args.Entries)
 		// rf.matchIndex[i] may be changed during rpc procedure
@@ -539,15 +538,11 @@ func (rf *Raft) convertToCandidate() {
 	rf.state = Candidate
 	rf.currentTerm++
 	rf.voteFor = rf.me
-	rf.resetElectionTimeout()
 }
 
 // only happened when args.term > rf.term.
 // reset election timeout when convert from leader
 func (rf *Raft) convertToFollower(newTerm int) {
-	if rf.state == Leader {
-		rf.resetElectionTimeout()
-	}
 	rf.state = Follower
 	rf.currentTerm = newTerm
 	rf.voteFor = -1
@@ -576,6 +571,7 @@ func (rf *Raft) HeartbeatRoutine() {
 			rf.mu.Unlock()
 			return
 		}
+		rf.resetElectionTimeout()
 		rf.broadcastHeartbeat(true)
 		rf.mu.Unlock()
 	}
@@ -607,6 +603,7 @@ func (rf *Raft) KickOffElection() {
 	//rf.mu.Lock()
 	// change state to candidate
 	rf.convertToCandidate()
+	rf.resetElectionTimeout()
 	rf.persist()
 	// construct request arg
 	lastLogEntry := rf.getLastLogEntry()
