@@ -33,9 +33,9 @@ import (
 // import "../labgob"
 
 // some const
-const ELECTION_INTERVAL = 500
+const ELECTION_INTERVAL = 250
 const ELECTION_CHECK_TICK = 10
-const HEARTBEAT_INTERVAL = 50
+const HEARTBEAT_INTERVAL = 80
 
 func min(a, b int) int {
 	if a >= b {
@@ -73,6 +73,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 }
 
 type LogEntry struct {
@@ -489,6 +490,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.state != Leader {
+		//DPrintf("[%d] in (term %d) as (%v) Start received command: index: %d, term: %d command: %+v", rf.me, rf.currentTerm, getStateName(rf.state), index, term, command)
 		return index, term, false
 	}
 	log := LogEntry{
@@ -503,8 +505,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index = log.Index
 	term = log.Term
 	isLeader = true
-	DPrintf("[%d] in (term %d) as (%v) Start received command: index: %d, term: %d", rf.me, rf.currentTerm, getStateName(rf.state), index, term)
-	//rf.broadcastHeartbeat(false)
+	DPrintf("[%d] in (term %d) as (%v) Start received command: index: %d, term: %d log: %+v", rf.me, rf.currentTerm, getStateName(rf.state), index, term, log)
+	rf.broadcastHeartbeat(false)
 	return index, term, isLeader
 }
 
@@ -672,6 +674,7 @@ func (rf *Raft) applier() {
 				CommandValid: true,
 				Command:      entry.Command,
 				CommandIndex: entry.Index,
+				CommandTerm:  entry.Term,
 			}
 		}
 		rf.mu.Lock()
