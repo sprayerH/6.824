@@ -47,7 +47,7 @@ func (ck *Clerk) RequestCommand(key string, value string, op string) string {
 		ok := ck.servers[ck.lastServer].Call("KVServer.CommandRequest", &args, &reply)
 		//DPrintf("Client[%v] SeqId[%v] leaderServer: %v GetReply: %+v", ck.clientId, ck.seqId, ck.lastServer, reply)
 		if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-			DPrintf("Client[%v] SeqId[%v] success leaderServer: %v GetReply: %+v", ck.clientId, ck.seqId, ck.lastServer, reply)
+			DPrintf("Client[%v] SeqId[%v] success leaderServer: %v GetReply: {Err: %v, len of val: %d}}", ck.clientId, ck.seqId, ck.lastServer, reply.Err, len(reply.Value))
 			ck.seqId++
 			return reply.Value
 		} else {

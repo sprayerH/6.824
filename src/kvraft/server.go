@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -38,12 +39,13 @@ type KVServer struct {
 	dead    int32 // set by Kill()
 
 	maxraftstate int // snapshot if log grows this big
+	persister    *raft.Persister
 
 	// Your definitions here.
-	maxSeqMap map[int64]int64           // [clientid]seqid
-	waitChans map[int]chan CommandReply //
-	kvStore   map[string]string
-	//lastApplied int
+	maxSeqMap   map[int64]int64           // [clientid]seqid
+	waitChans   map[int]chan CommandReply //
+	kvStore     map[string]string
+	lastApplied int
 }
 
 func (kv *KVServer) getChannelL(index int) chan CommandReply {
@@ -59,7 +61,7 @@ func (kv *KVServer) isDuplicatedL(clientId, seqId int64) bool {
 }
 
 func (kv *KVServer) CommandRequest(args *CommandRequest, reply *CommandReply) {
-	defer DPrintf("Server-{%v} processes request %v with reply %v", kv.me, args, reply)
+	//defer DPrintf("Server-{%v} processes request %v with reply %v", kv.me, args, reply)
 	kv.mu.Lock()
 	// check duplicated and outdated write request and just return ok
 	if args.OpType != OpGet && kv.isDuplicatedL(args.ClientId, args.SeqId) {
@@ -78,7 +80,7 @@ func (kv *KVServer) CommandRequest(args *CommandRequest, reply *CommandReply) {
 		SeqId:    args.SeqId,
 	})
 	if !isLeader {
-		DPrintf("Server<%d> KVServer<-[%d:%d] not Leader", kv.me, args.ClientId, args.SeqId)
+		//DPrintf("Server<%d> KVServer<-[%d:%d] not Leader", kv.me, args.ClientId, args.SeqId)
 		reply.Err = ErrWrongLeader
 		return
 	}
@@ -90,12 +92,12 @@ func (kv *KVServer) CommandRequest(args *CommandRequest, reply *CommandReply) {
 	DPrintf("Server<%d> KVServer<-[%d:%d] wait chan %d", kv.me, args.ClientId, args.SeqId, index)
 	select {
 	case r := <-ch:
-		DPrintf("Server<%d> KVServer<-[%d:%d] get from chan %v", kv.me, args.ClientId, args.SeqId, r)
+		DPrintf("Server<%d> KVServer<-[%d:%d] get from chan index %d", kv.me, args.ClientId, args.SeqId, index)
 		reply.Err, reply.Value = r.Err, r.Value
 		return
 	case <-time.After(waitRaftTimeout):
 		// maybe ErrTimeout is better
-		DPrintf("Server<%d> KVServer<-[%d:%d] timeout", kv.me, args.ClientId, args.SeqId)
+		//DPrintf("Server<%d> KVServer<-[%d:%d] timeout", kv.me, args.ClientId, args.SeqId)
 		reply.Err = ErrWrongLeader
 	}
 	defer func() {
@@ -109,11 +111,17 @@ func (kv *KVServer) applyLog() {
 	for !kv.killed() {
 		for message := range kv.applyCh {
 			//case message := <-kv.applyCh:
-			DPrintf("Server<%d> KVServer applych <- %v", kv.me, message)
 			if message.CommandValid {
+				DPrintf("Server<%d> KVServer applych <- command index %d term %d", kv.me, message.CommandIndex, message.CommandTerm)
 				kv.mu.Lock()
+				if message.CommandIndex <= kv.lastApplied {
+					kv.mu.Unlock()
+					continue
+				}
+				kv.lastApplied = message.CommandIndex
+
 				op := message.Command.(Op)
-				DPrintf("Server<%d> KVServer process op %v", kv.me, op)
+				//DPrintf("Server<%d> KVServer process op %v", kv.me, op)
 				reply := CommandReply{OK, ""}
 				if op.OpType != OpGet && kv.isDuplicatedL(op.ClientId, op.SeqId) {
 					reply = CommandReply{OK, ""}
@@ -124,10 +132,10 @@ func (kv *KVServer) applyLog() {
 					switch op.OpType {
 					case OpPut:
 						kv.kvStore[op.Key] = op.Value
-						DPrintf("Server<%d> KVServer Put value %v to key %v", kv.me, op.Value, op.Key)
+						//DPrintf("Server<%d> KVServer Put value", kv.me, op.Value, op.Key)
 					case OpAppend:
 						kv.kvStore[op.Key] += op.Value
-						DPrintf("Server<%d> KVServer Append value %v to key %v", kv.me, op.Value, op.Key)
+						//DPrintf("Server<%d> KVServer Append value", kv.me, op.Value, op.Key)
 					case OpGet:
 						if value, ok := kv.kvStore[op.Key]; ok {
 							reply.Value = value
@@ -139,17 +147,65 @@ func (kv *KVServer) applyLog() {
 
 				// follower should not notify
 				// 有没有可能server apply之后就挂了/退化成了follower
-				// 不应该这么写 应该把start中获得的index和term来作对比 如果一致才能返回给
+				// alternative: 把start中获得的index和term来作对比 如果一致才能返回给
 				if currentTerm, isLeader := kv.rf.GetState(); isLeader && message.CommandTerm == currentTerm {
 					ch := kv.getChannelL(message.CommandIndex)
 					ch <- reply
-					DPrintf("Server<%d> KVServer reply->chan %v", kv.me, reply)
+					DPrintf("Server<%d> KVServer reply->chan index %d term %d", kv.me, message.CommandIndex, message.CommandTerm)
 				}
-				// ch := kv.getChannelL(message.CommandIndex)
-				// ch <- reply
+
+				// check if need snapshot
+				if kv.maxraftstate != -1 && kv.persister.RaftStateSize() > kv.maxraftstate {
+					kv.Snapshot(kv.lastApplied)
+				}
+
 				kv.mu.Unlock()
+			} else if message.SnapshotValid {
+				DPrintf("Server<%d> KVServer applych <- snapshot index %d term %d", kv.me, message.SnapshotIndex, message.SnapshotTerm)
+				if kv.rf.CondInstallSnapshot(message.SnapshotTerm, message.SnapshotIndex, message.Snapshot) {
+					DPrintf("Server<%d> KVServer install snapshot at index %d", kv.me, message.SnapshotIndex)
+					kv.mu.Lock()
+					if message.SnapshotIndex > kv.lastApplied {
+						kv.installSnapshot(message.Snapshot)
+						kv.lastApplied = message.SnapshotIndex
+					}
+					kv.mu.Unlock()
+				}
 			}
 		}
+	}
+}
+
+// caller hold lock
+func (kv *KVServer) Snapshot(index int) {
+	DPrintf("Server<%d> KVServer snapshot at before index %d", kv.me, index)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.kvStore)
+	e.Encode(kv.maxSeqMap)
+	e.Encode(kv.lastApplied)
+	data := w.Bytes()
+	kv.rf.Snapshot(index, data)
+}
+
+// caller hold lock
+func (kv *KVServer) installSnapshot(snapshot []byte) {
+	if snapshot == nil || len(snapshot) < 1 { // bootstrap without any state?
+		return
+	}
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	var kvStore map[string]string
+	var maxseqMap map[int64]int64
+	var lastApplied int
+
+	if d.Decode(&kvStore) != nil || d.Decode(&maxseqMap) != nil ||
+		d.Decode(&lastApplied) != nil {
+		DPrintf("error to read the snapshot data")
+	} else {
+		kv.kvStore = kvStore
+		kv.maxSeqMap = maxseqMap
+		kv.lastApplied = lastApplied
 	}
 }
 
@@ -196,7 +252,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
-
+	kv.persister = persister
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
@@ -204,6 +260,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxSeqMap = make(map[int64]int64)
 	kv.waitChans = make(map[int]chan CommandReply)
 	kv.kvStore = make(map[string]string)
+	kv.lastApplied = 0
+
+	kv.installSnapshot(kv.persister.ReadSnapshot())
 
 	// You may need initialization code here.
 	go kv.applyLog()
