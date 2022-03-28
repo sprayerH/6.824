@@ -34,7 +34,8 @@ func (rf *Raft) handleInstallSnapshot(peer int, args *InstallSnapshotArgs, reply
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("[%d] in (term %d) as (%v) received installSnapshot RPC %+v", rf.me, rf.currentTerm, getStateName(rf.state), args)
+	DPrintf("[%d] in (term %d) as (%v) received installSnapshot RPC {Term: %d LeaderId:%d LastIncludedIndex:%d LastIncludedTerm %d }",
+		rf.me, rf.currentTerm, getStateName(rf.state), args.Term, args.LeaderId, args.LastIncludedIndex, args.LastIncludedTerm)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		return

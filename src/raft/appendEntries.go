@@ -48,7 +48,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.state = Follower
 	rf.resetElectionTimeout()
 
-	// safety check maybe it wont happen forever
+	// safety check when reply is delayed and follower snapshot its logs, just return false and term == 0 
+	// should just return in appendEntries handler 
 	if args.PrevLogIndex < firstlog.Index {
 		reply.Term, reply.Success = 0, false
 		return

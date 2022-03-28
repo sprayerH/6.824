@@ -35,7 +35,7 @@ import (
 // some const
 const ELECTION_INTERVAL = 400
 const ELECTION_CHECK_TICK = 10
-const HEARTBEAT_INTERVAL = 80
+const HEARTBEAT_INTERVAL = 50
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -240,7 +240,7 @@ func (rf *Raft) broadcastHeartbeat(isHeartbeat bool) {
 
 				// send appendEntries rpc
 				firstLogIndex := rf.getFirstLog().Index
-				DPrintf("[%d] in (term %d) as (%v) before send to [%d] firstlogindex: %d, prevLogIndex: %d", rf.me, rf.currentTerm, getStateName(rf.state), i, firstLogIndex, prevLogIndex)
+				//DPrintf("[%d] in (term %d) as (%v) before send to [%d] firstlogindex: %d, prevLogIndex: %d", rf.me, rf.currentTerm, getStateName(rf.state), i, firstLogIndex, prevLogIndex)
 				args := AppendEntriesArgs{
 					Term:         rf.currentTerm,
 					LeaderId:     rf.me,
@@ -274,11 +274,18 @@ func (rf *Raft) doReplicate(peer int, args *AppendEntriesArgs) {
 	if rf.currentTerm != args.Term || rf.state != Leader {
 		return
 	}
+
+	// outdated reply. should just return
+	if reply.Term < rf.currentTerm {
+		return
+	}
+
 	if rf.currentTerm < reply.Term {
 		rf.convertToFollower(reply.Term)
 		rf.persist()
 		return
 	}
+
 	if reply.Success {
 		matchIndex := args.PrevLogIndex + len(args.Entries)
 		// rf.matchIndex[i] may be changed during rpc procedure
