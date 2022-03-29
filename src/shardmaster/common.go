@@ -1,5 +1,7 @@
 package shardmaster
 
+import "fmt"
+
 //
 // Master shard server: assigns shards to replication groups.
 //
@@ -29,45 +31,56 @@ type Config struct {
 }
 
 const (
-	OK = "OK"
+	OK             = "OK"
+	ErrWrongLeader = "ErrWrongLeader"
 )
 
 type Err string
 
-type JoinArgs struct {
+const (
+	OpJoin  = "Join"
+	OpLeave = "Leave"
+	OpMove  = "Move"
+	OpQuery = "Query"
+)
+
+type CommandArgs struct {
+	OpType     string
+	ClientId   int64
+	SequenceId int64
+
+	// join
 	Servers map[int][]string // new GID -> servers mappings
-}
-
-type JoinReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-type LeaveArgs struct {
+	// leaves
 	GIDs []int
-}
-
-type LeaveReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-type MoveArgs struct {
+	// move
 	Shard int
 	GID   int
-}
-
-type MoveReply struct {
-	WrongLeader bool
-	Err         Err
-}
-
-type QueryArgs struct {
+	//query
 	Num int // desired config number
 }
 
-type QueryReply struct {
-	WrongLeader bool
-	Err         Err
-	Config      Config
+func (ca CommandArgs) String() string {
+	switch ca.OpType {
+	case OpJoin:
+		return fmt.Sprintf("[%d:%d] %s<Servers:%v>", ca.ClientId, ca.SequenceId, ca.OpType, ca.Servers)
+	case OpLeave:
+		return fmt.Sprintf("[%d:%d] %s<GIDs:%v>", ca.ClientId, ca.SequenceId, ca.OpType, ca.GIDs)
+	case OpMove:
+		return fmt.Sprintf("[%d:%d] %s<Shard:%v GID:%v>", ca.ClientId, ca.SequenceId, ca.OpType, ca.Shard, ca.GID)
+	case OpQuery:
+		return fmt.Sprintf("[%d:%d] %s<Num:%v>", ca.ClientId, ca.SequenceId, ca.OpType, ca.Num)
+	}
+	panic(fmt.Sprintf("unexpected OpType %v", ca.OpType))
+}
+
+type CommandReply struct {
+	Err Err
+
+	// QueryReply
+	Config Config
+}
+
+func (cr CommandReply) String() string {
+	return fmt.Sprintf("{Status:%s,Config:%v}", cr.Err, cr.Config)
 }
