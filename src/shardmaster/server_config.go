@@ -1,6 +1,8 @@
 package shardmaster
 
-import "sort"
+import (
+	"sort"
+)
 
 func (c *Config) isInitial() bool {
 	for _, gid := range c.Shards {
@@ -12,127 +14,88 @@ func (c *Config) isInitial() bool {
 }
 
 func (c *Config) joinNewGroupsAndRebalanceShards(newGroups map[int][]string) {
+	numOfGroups := len(c.Groups)
 	for gid, servers := range newGroups {
 		if _, ok := c.Groups[gid]; !ok {
+			numOfGroups++
 			newServers := make([]string, len(servers))
 			copy(newServers, servers)
 			c.Groups[gid] = newServers
 		}
 	}
+
+	if numOfGroups == 0 {
+		return
+	}
+
+	c.rebalanceShards()
+}
+
+func (c *Config) leaveGroupsAndReassignShards(gids []int) {
+	numOfGroups := len(c.Groups)
+	for _, gid := range gids {
+		if _, ok := c.Groups[gid]; ok {
+			delete(c.Groups, gid)
+			numOfGroups--
+		}
+	}
+	if numOfGroups == 0 {
+		c.Shards = [NShards]int{}
+		c.Groups = map[int][]string{}
+		return
+	}
+
 	c.rebalanceShards()
 }
 
 func (c *Config) rebalanceShards() {
-	if c.isInitial() {
-		if gids := c.sortGIDsByGroups(); len(gids) > 0 {
-			firstGID := gids[0]
-			for idx := range c.Shards {
-				c.Shards[idx] = firstGID
+	freeShards := []int{}
+	gid2Shards := map[int][]int{}
+
+	numOfGroups := len(c.Groups)
+
+	avgNum := NShards / numOfGroups
+	// 由于不能绝对平均 所以有些group会拥有大于
+	greaterNum := NShards % numOfGroups
+
+	for gid := range c.Groups {
+		gid2Shards[gid] = []int{}
+	}
+
+	// 遍历旧shards数组
+	for shard, gid := range c.Shards {
+		// 回收孤儿shard
+		if shards, ok := gid2Shards[gid]; !ok {
+			freeShards = append(freeShards, shard)
+		} else {
+			// 损有余
+			if len(shards) > avgNum || (len(shards) == avgNum && greaterNum <= 0) {
+				freeShards = append(freeShards, shard)
+			} else {
+				if len(shards) == avgNum && greaterNum > 0 {
+					greaterNum--
+				}
+				gid2Shards[gid] = append(gid2Shards[gid], shard)
 			}
 		}
 	}
 
-	group2shards := c.group2shards()
-	for {
-		maxShardsGID, maxShardsCnt, minShardsGID, minShardsCnt := getMaxMinShardsGID(group2shards)
-		if maxShardsCnt-minShardsCnt <= 1 {
-			break
-		}
-		group2shards[minShardsGID] = append(group2shards[minShardsGID], group2shards[maxShardsGID][0])
-		group2shards[maxShardsGID] = group2shards[maxShardsGID][1:]
-	}
-	var newShards [NShards]int
-	for gid, shards := range group2shards {
-		for _, shard := range shards {
-			newShards[shard] = gid
-		}
-	}
-	c.Shards = newShards
-}
-
-func (c *Config) leaveGroupsAndReassignShards(gids []int) {
-	orphanShards := make([]int, 0)
-	group2shards := c.group2shards()
-	for _, gid := range gids {
-		if _, ok := c.Groups[gid]; ok {
-			delete(c.Groups, gid)
-		}
-		if shards, ok := group2shards[gid]; ok {
-			orphanShards = append(orphanShards, shards...)
-			delete(group2shards, gid)
-		}
-	}
-	c.Shards = reassignShards(orphanShards, group2shards)
-}
-
-func reassignShards(orphanShards []int, group2shards map[int][]int) [NShards]int {
-	for _, shard := range orphanShards {
-		_, _, minShardsGID, _ := getMaxMinShardsGID(group2shards)
-		group2shards[minShardsGID] = append(group2shards[minShardsGID], shard)
-	}
-
-	var newShards [NShards]int
-	for gid, shards := range group2shards {
-		for _, shard := range shards {
-			newShards[shard] = gid
-		}
-	}
-	return newShards
-}
-
-func getMaxMinShardsGID(group2shards map[int][]int) (maxShardsGID, maxShardsCnt, minShardsGID, minShardsCnt int) {
-	maxShardsGID, maxShardsCnt = 0, -1
-	minShardsGID, minShardsCnt = 0, NShards
-
-	keys := make([]int, 0)
-	for key := range group2shards {
-		keys = append(keys, key)
+	// 排序 用于遍历map 防止多个raft执行这一段代码时遍历顺序不一致导致shard分配不一致
+	var keys []int
+	for k := range gid2Shards {
+		keys = append(keys, k)
 	}
 	sort.Ints(keys)
 
-	for _, key := range keys {
-		val := group2shards[key]
-		if len(val) > maxShardsCnt {
-			maxShardsGID = key
-			maxShardsCnt = len(val)
+	freeShardIndex := 0
+	for _, k := range keys {
+		shards := gid2Shards[k]
+		// 补不足
+		if len(shards) < avgNum {
+			for i := 0; i < avgNum-len(shards); i++ {
+				c.Shards[freeShards[freeShardIndex]] = k
+				freeShardIndex++
+			}
 		}
-
-		if len(val) < minShardsCnt {
-			minShardsGID = key
-			minShardsCnt = len(val)
-		}
 	}
-	return
-}
-
-func (c *Config) sortGIDsByGroups() []int {
-	keys := make([]int, 0)
-	for key := range c.Groups {
-		keys = append(keys, key)
-	}
-	sort.Ints(keys)
-	return keys
-}
-
-func (c *Config) group2shards() map[int][]int {
-	group2shards := make(map[int][]int)
-	if len(c.Groups) == 0 {
-		return group2shards
-	}
-
-	// init group2shard map
-	for gid := range c.Groups {
-		if gid == 0 {
-			continue
-		}
-		group2shards[gid] = make([]int, 0)
-	}
-	// calc group2shard count
-	for shard, gid := range c.Shards {
-		if gid == 0 {
-			continue
-		}
-		group2shards[gid] = append(group2shards[gid], shard)
-	}
-	return group2shards
 }
