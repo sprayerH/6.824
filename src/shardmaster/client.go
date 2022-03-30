@@ -80,7 +80,7 @@ func (ck *Clerk) Move(shard int, gid int) {
 func (ck *Clerk) Command(args *CommandArgs) Config {
 	for {
 		reply := &CommandReply{}
-		DPrintf("Client[%d] send command(type: %s) to server[%d]", ck.clientId, args.OpType, ck.leaderId)
+		//DPrintf("Client[%d] send command(type: %s) to server[%d]", ck.clientId, args.OpType, ck.leaderId)
 		ok := ck.servers[ck.leaderId].Call("ShardMaster.Command", args, reply)
 		if !ok || reply.Err != OK {
 			ck.leaderId = (ck.leaderId + 1) % int64(len(ck.servers))

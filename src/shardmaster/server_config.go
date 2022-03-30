@@ -98,4 +98,11 @@ func (c *Config) rebalanceShards() {
 			}
 		}
 	}
+	j := 0
+	for i := freeShardIndex; i < len(freeShards); i++ {
+		if _, ok := c.Groups[c.Shards[freeShards[i]]]; !ok {
+			c.Shards[freeShards[i]] = keys[j]
+			j++
+		}
+	}
 }

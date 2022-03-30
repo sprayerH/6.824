@@ -12,7 +12,7 @@ import (
 	"6.824/raft"
 )
 
-const Debug = 1
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -101,7 +101,7 @@ func (sm *ShardMaster) applyLog() {
 	for !sm.killed() {
 		for message := range sm.applyCh {
 			if message.CommandValid {
-				DPrintf("Server<%d> ShardMaster applych <- command index %d term %d", sm.me, message.CommandIndex, message.CommandTerm)
+				//DPrintf("Server<%d> ShardMaster applych <- command index %d term %d", sm.me, message.CommandIndex, message.CommandTerm)
 				sm.mu.Lock()
 
 				op := message.Command.(Op)
@@ -117,7 +117,7 @@ func (sm *ShardMaster) applyLog() {
 				if currentTerm, isLeader := sm.rf.GetState(); isLeader && message.CommandTerm == currentTerm {
 					ch := sm.getChannelL(message.CommandIndex)
 					ch <- reply
-					DPrintf("Server<%d> KVServer reply->chan index %d term %d", sm.me, message.CommandIndex, message.CommandTerm)
+					//DPrintf("Server<%d> KVServer reply->chan index %d term %d", sm.me, message.CommandIndex, message.CommandTerm)
 				}
 				sm.mu.Unlock()
 			}
